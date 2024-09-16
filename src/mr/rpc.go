@@ -46,16 +46,6 @@ type TaskCompletion struct {
 	OutputFiles []string // For map tasks to report intermediate files
 }
 
-// HeartbeatRequest is used by workers to send periodic heartbeats
-type HeartbeatRequest struct {
-	WorkerID int
-}
-
-// HeartbeatResponse is used by the coordinator to acknowledge heartbeats
-type HeartbeatResponse struct {
-	Ack bool
-}
-
 // Add your RPC definitions here.
 
 // Cook up a unique-ish UNIX-domain socket name

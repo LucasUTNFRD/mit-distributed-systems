@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"io"
+	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"time"
 )
+
+const TempDir = "temp"
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -35,16 +38,20 @@ func Worker(mapf func(string, string) []KeyValue,
 		reply, succ := requestTask()
 		if !succ {
 			fmt.Println("Faile to get task from coordinator.")
-			return
-			//should i return or continue next loop to retry?
+			time.Sleep(1 * time.Second)
+			continue
 		}
+		log.Printf("Worker %d starting task: %v", os.Getpid(), reply.TaskType)
 		switch reply.TaskType {
 		case MapTask:
 			performMap(mapf, reply)
+			reportTaskDone(MapTask, reply.NReduce, reply.TaskID)
 		case ReduceTask:
-			performReduce()
+			performReduce(reducef, reply)
+			reportTaskDone(ReduceTask, reply.NReduce, reply.TaskID)
 		case ExitTask:
 			fmt.Println("No task left. Worker shuting down.")
+			return
 		case NoTask:
 			fmt.Println("No task available. Waiting...")
 			//avoid spin waiting
@@ -53,6 +60,29 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+}
+
+func reportTaskDone(taskType TaskType, nReduce, taskID int) {
+	args := TaskCompletion{
+		WorkerID: os.Getpid(),
+		TaskType: taskType,
+		TaskID:   taskID,
+	}
+
+	// For Map tasks, we need to report the intermediate files
+	if taskType == MapTask {
+		args.OutputFiles = make([]string, 0)
+		for i := 0; i < nReduce; i++ {
+			filename := fmt.Sprintf("%v/mr-%d-%d", TempDir, taskID, i)
+			args.OutputFiles = append(args.OutputFiles, filename)
+		}
+	}
+
+	reply := TaskResponse{}
+	ok := call("Coordinator.NotifyTaskCompletion", &args, &reply)
+	if !ok {
+		log.Printf("Failed to report task completion for %v task %d", taskType, taskID)
+	}
 }
 
 // function to ask the coordinator for a new task.
@@ -64,71 +94,106 @@ func requestTask() (TaskResponse, bool) {
 	return reply, ok
 }
 
-// function to execute map tasks
 func performMap(mapf func(string, string) []KeyValue, task TaskResponse) {
-	// 1. Read the input file
 	filename := task.MapFile
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
 	}
-	content, err := io.ReadAll(file)
+	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 	}
 	file.Close()
-	//2.Apply user-defined mapf to get KV pairs
 	kva := mapf(filename, string(content))
-	// 3. Perform JSON encoding for intermediate files to handle arbitrary KV types
-	intermediateFiles := make([]*os.File, task.NReduce)
-	encoders := make([]*json.Encoder, task.NReduce)
-	for i := 0; i < task.NReduce; i++ {
-		intermediateFiles[i], err = createIntermediateFile(task.TaskID, i)
+
+	writeMapOutput(kva, task.TaskID, task.NReduce)
+}
+
+func writeMapOutput(kva []KeyValue, mapID int, nReduce int) {
+	tempFiles := make([]*os.File, nReduce)
+	encoders := make([]*json.Encoder, nReduce)
+
+	for i := 0; i < nReduce; i++ {
+		tempFile, err := ioutil.TempFile(TempDir, "intermediate-")
 		if err != nil {
-			log.Fatalf("cannot create intermediate file: %v", err)
+			log.Fatalf("cannot create temp file")
 		}
-		encoders[i] = json.NewEncoder(intermediateFiles[i])
+		tempFiles[i] = tempFile
+		encoders[i] = json.NewEncoder(tempFiles[i])
 	}
 
-	// Partition and encode key-value pairs
 	for _, kv := range kva {
-		reduceTaskNum := ihash(kv.Key) % task.NReduce
-		err := encoders[reduceTaskNum].Encode(&kv)
+		reduceID := ihash(kv.Key) % nReduce
+		err := encoders[reduceID].Encode(&kv)
 		if err != nil {
-			log.Fatalf("cannot encode key-value pair: %v", err)
+			log.Fatalf("cannot encode kv")
 		}
 	}
 
-	// Close intermediate files
-	for _, f := range intermediateFiles {
-		f.Close()
+	for i, tempFile := range tempFiles {
+		tempFile.Close()
+		filename := fmt.Sprintf("%v/mr-%d-%d", TempDir, mapID, i)
+		os.Rename(tempFile.Name(), filename)
+	}
+}
+
+func performReduce(reducef func(string, []string) string, task TaskResponse) {
+	files, err := filepath.Glob(fmt.Sprintf("%v/mr-*-%d", TempDir, task.TaskID))
+	if err != nil {
+		log.Fatalf("cannot read temp files")
 	}
 
-	// 4. Notify task completion
-	notifyTaskCompletion(task.TaskID, MapTask)
-}
+	intermediate := make(map[string][]string)
 
-// Helper function to create intermediate files
-func createIntermediateFile(mapTaskID, reduceTaskID int) (*os.File, error) {
-	filename := fmt.Sprintf("mr-%d-%d", mapTaskID, reduceTaskID)
-	return os.Create(filename)
-}
+	for _, filepath := range files {
+		file, err := os.Open(filepath)
+		if err != nil {
+			log.Fatalf("cannot open temp file")
+		}
 
-// function to executre reduce tasks
-func performReduce() {}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			err := dec.Decode(&kv)
+			if err != nil {
+				break
+			}
+			intermediate[kv.Key] = append(intermediate[kv.Key], kv.Value)
+		}
 
-func notifyTaskCompletion(taskID int, taskType TaskType) {
-	//this will use an RPC call to notify completion of a task
-	args := TaskCompletion{
-		WorkerID: os.Getpid(),
-		TaskID:   taskID,
-		TaskType: taskType,
+		file.Close()
 	}
-	reply := struct{}{}
 
-	//permorm call
-	call("Coordinator.NotifyTaskCompletion", &args, &reply)
+	outputFile, err := ioutil.TempFile(TempDir, "mr-out-")
+	if err != nil {
+		log.Fatalf("cannot create temp file")
+	}
+	defer outputFile.Close()
+
+	for key, values := range intermediate {
+		output := reducef(key, values)
+		fmt.Fprintf(outputFile, "%v %v\n", key, output)
+	}
+
+	finalFilename := fmt.Sprintf("mr-out-%d", task.TaskID)
+	os.Rename(outputFile.Name(), finalFilename)
 }
+
+// func notifyTaskCompletion(taskID int, taskType TaskType, outputFiles []string) {
+// 	//this will use an RPC call to notify completion of a task
+// 	args := TaskCompletion{
+// 		WorkerID:    os.Getpid(),
+// 		TaskID:      taskID,
+// 		TaskType:    taskType,
+// 		OutputFiles: outputFiles,
+// 	}
+// 	reply := struct{}{}
+// 	log.Printf("Received completion notification for %v task %d from worker %d", args.TaskType, args.TaskID, args.WorkerID)
+
+// 	//perform call
+// 	call("Coordinator.NotifyTaskCompletion", &args, &reply)
+// }
 
 // example function to show how to make an RPC call to the coordinator.
 //

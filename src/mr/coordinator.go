@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -87,44 +89,110 @@ func (c *Coordinator) RequestTask(args *TaskRequest, reply *TaskResponse) error 
 	} else {
 		c.workers[workerPID].LastHeard = time.Now()
 	}
-
 	// Assign task logic
-	if len(c.mapTasks) > 0 {
+	// Check and update phases
+	if c.status == MapPhase && c.mapTasksCompleted == c.nMap {
+		c.status = ReducePhase
+		// Initialize reduce tasks if not already done
+		if len(c.reduceTasks) == 0 {
+			for i := 0; i < c.nReduce; i++ {
+				c.reduceTasks = append(c.reduceTasks, Task{
+					Type:   ReduceTask,
+					Status: Idle,
+					TaskID: i,
+				})
+			}
+		}
+	} else if c.status == ReducePhase && c.reduceTasksCompleted == c.nReduce {
+		c.status = ExistPhase
+	}
+
+	// Assign tasks based on current phase
+	switch c.status {
+	case MapPhase:
 		for i, task := range c.mapTasks {
 			if task.Status == Idle {
 				c.mapTasks[i].Status = InProgress
-				c.mapTasks[i].WorkerID = workerPID
+				c.mapTasks[i].WorkerID = args.WorkerID
 				reply.TaskType = MapTask
 				reply.TaskID = task.TaskID
 				reply.MapFile = task.File
 				reply.NReduce = c.nReduce
-
 				go c.waitTask(&c.mapTasks[i])
 				return nil
 			}
 		}
-	} else if c.mapTasksCompleted == c.nMap && len(c.reduceTasks) > 0 {
+
+	case ReducePhase:
 		for i, task := range c.reduceTasks {
 			if task.Status == Idle {
 				c.reduceTasks[i].Status = InProgress
-				c.reduceTasks[i].WorkerID = workerPID
+				c.reduceTasks[i].WorkerID = args.WorkerID
 				reply.TaskType = ReduceTask
 				reply.TaskID = task.TaskID
 				reply.ReduceFiles = c.intermediateFiles[task.TaskID]
-
 				go c.waitTask(&c.reduceTasks[i])
 				return nil
 			}
 		}
-	}
 
+	case ExistPhase:
+		reply.TaskType = ExitTask
+		return nil
+	}
 	// If no tasks available, tell worker to wait
 	reply.TaskType = NoTask
 	return nil
 }
-func (c *Coordinator) NotifyTaskCompletion(args *TaskRequest, reply *TaskResponse) {}
 
-func (c *Coordinator) waitTask(task *Task) {}
+//If we receive a message, saying that a task has been done, we need to do the following:
+// Check the task type, state of the task, and whether the result comes back from someone who is actually responsible for the job.
+// Change the task status
+// If all tasks (map and reduce) have been finished, get back to the workers, telling them that we have done all the jobs.
+
+func (c *Coordinator) NotifyTaskCompletion(args *TaskCompletion, reply *TaskResponse) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	log.Printf("Received task request from worker %d", args.WorkerID)
+	switch args.TaskType {
+	case MapTask:
+		if c.mapTasks[args.TaskID].Status == InProgress && c.mapTasks[args.TaskID].WorkerID == args.WorkerID {
+			c.mapTasks[args.TaskID].Status = Completed
+			c.mapTasksCompleted++
+			for _, file := range args.OutputFiles {
+				reduceTaskNum := extractReduceTaskNum(file)
+				c.intermediateFiles[reduceTaskNum] = append(c.intermediateFiles[reduceTaskNum], file)
+			}
+		}
+	case ReduceTask:
+		if c.reduceTasks[args.TaskID].Status == InProgress && c.reduceTasks[args.TaskID].WorkerID == args.WorkerID {
+			c.reduceTasks[args.TaskID].Status = Completed
+			c.reduceTasksCompleted++
+		}
+	}
+	return nil
+}
+
+func extractReduceTaskNum(filename string) int {
+	parts := strings.Split(filename, "-")
+	if len(parts) != 3 {
+		log.Fatalf("unexpected intermediate filename format: %s", filename)
+	}
+	num, err := strconv.Atoi(parts[2])
+	if err != nil {
+		log.Fatalf("error parsing reduce task number from filename %s: %v", filename, err)
+	}
+	return num
+}
+func (c *Coordinator) waitTask(task *Task) {
+	time.Sleep(10 * time.Second)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if task.Status == InProgress {
+		task.Status = Idle
+		task.WorkerID = 0
+	}
+}
 
 // an example RPC handler.
 //
@@ -158,7 +226,7 @@ func (c *Coordinator) Done() bool {
 	defer c.mu.Unlock()
 
 	if c.status == ExistPhase {
-		if c.nMap == 0 && c.nReduce == 0 {
+		if c.mapTasksCompleted == c.nMap && c.reduceTasksCompleted == c.nReduce {
 			ret = true
 		}
 	}
@@ -183,9 +251,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for i := 0; i < c.nReduce; i++ {
 		c.reduceTasks[i] = Task{Type: ReduceTask, Status: Idle, File: "", TaskID: i}
 	}
-
+	c.intermediateFiles = make([][]string, nReduce)
 	c.status = MapPhase
+	c.workers = make(map[int]*WorkerInfo)
 
+	os.Mkdir(TempDir, 0755)
 	c.server()
 	return &c
 }
