@@ -1,0 +1,32 @@
+## Overall Structure:
+- Coordinator (src/mr/coordinator.go):
+    - There will be only one coordinator process.
+    - It's responsible for:
+        - Handing out tasks to workers
+        - Handling failed workers
+        - Tracking the overall progress of the MapReduce job
+- Workers (src/mr/worker.go):
+    - Multiple worker processes can run in parallel.
+    - Each worker:
+        - Asks the coordinator for a task
+        - Reads input from files
+        - Executes the task (Map or Reduce)
+        - Writes output to files
+- Communication:
+    - Workers communicate with the coordinator using RPCs (Remote Procedure Calls).
+- Task Types:
+    - Map tasks: Process input files and generate intermediate key-value pairs.
+    - Reduce tasks: Process intermediate data and produce final output.
+- File Handling:
+    - Input files: Provided as arguments to the coordinator (pg-.txt files in the example).
+    - Intermediate files: Created by Map tasks, read by Reduce tasks.
+    - Output files: Created by Reduce tasks, named mr-out-X.
+- Fault Tolerance:
+    - The coordinator should detect if a worker hasn't completed its task within a reasonable time (10 seconds in this lab).
+    - If a worker is deemed to have failed, the coordinator should reassign the task to a different worker.
+- Parallelism:
+    - The system should run Map and Reduce tasks in parallel across multiple workers.
+- Completion:
+    - The coordinator needs to implement a Done() method that returns true when the entire MapReduce job is finished.
+- Plugin System:
+    - The actual Map and Reduce functions are loaded at runtime using Go's plugin system.
