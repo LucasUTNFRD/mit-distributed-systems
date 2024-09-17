@@ -2,7 +2,6 @@ package kvsrv
 
 import (
 	"crypto/rand"
-	"log"
 	"math/big"
 
 	"6.5840/labrpc"
@@ -11,6 +10,8 @@ import (
 type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientId int64
+	seqNum   int
 }
 
 func nrand() int64 {
@@ -24,6 +25,8 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.server = server
 	// You'll have to add code here.
+	ck.seqNum = 0
+	ck.clientId = nrand()
 	return ck
 }
 
@@ -37,18 +40,21 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
+
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	args := GetArgs{Key: key}
-	reply := GetReply{}
-	ok := ck.server.Call("KVServer.Get", &args, &reply)
-	if ok {
-		return reply.Value
-	}
+	var reply GetReply
+	ok := false
 
-	log.Printf("Server call for Get failed")
-	return ""
+	ck.seqNum++
+
+	for !ok {
+		args := GetArgs{key, ck.clientId, ck.seqNum}
+		reply = GetReply{}
+		ok = ck.server.Call("KVServer.Get", &args, &reply)
+
+	}
+	return reply.Value
 }
 
 // shared by Put and Append.
@@ -60,15 +66,18 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
-	// You will have to modify this function.
-	args := PutAppendArgs{Key: key, Value: value}
-	reply := PutAppendReply{}
-	ok := ck.server.Call("KVServer."+op, &args, &reply)
-	if ok {
-		return reply.Value
+	var reply PutAppendReply
+	ck.seqNum++
+
+	ok := false
+	for !ok {
+		args := PutAppendArgs{key, value, ck.clientId, ck.seqNum}
+		reply = PutAppendReply{}
+
+		ok = ck.server.Call("KVServer."+op, &args, &reply)
 	}
-	log.Printf("Server call for %s failed", op)
-	return ""
+
+	return reply.Value
 }
 
 func (ck *Clerk) Put(key string, value string) {
