@@ -494,6 +494,8 @@ func (rf *Raft) KickOffElection() {
 				voteCh <- false
 				return
 			}
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			if reply.Term > rf.currentTerm {
 				// convert to follower
 				rf.convertToFollower(reply.Term)
@@ -583,7 +585,7 @@ func (rf *Raft) sendHeartbeat(server int) {
 
 // countVotes collects votes from the vote channel and determines whether the candidate wins the election.
 func (rf *Raft) countVotes(voteCh chan bool, term int) {
-	votes := 1 // voted for self
+	votes := 0 // voted for self
 	majority := len(rf.peers)/2 + 1
 	// we need the term were we start counting votes
 	for range rf.peers {
