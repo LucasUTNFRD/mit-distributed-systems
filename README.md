@@ -6,7 +6,7 @@
 
 - [x] Lab 3: Raft Consensus Algorithm
   - [x] Lab 3A: Raft Leader Election
-  - [ ] Lab 3B: Raft Log
+  - [x] Lab 3B: Raft Log
   - [ ] Lab 3C: Raft state persistence
   - [ ] Lab 3D: Raft Log compaction
 
