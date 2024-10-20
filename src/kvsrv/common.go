@@ -8,7 +8,7 @@ type PutAppendArgs struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	ClientID int64
-	SeqNum   int
+	SeqNum   uint64
 }
 
 type PutAppendReply struct {
@@ -18,7 +18,7 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key      string
 	ClientID int64
-	SeqNum   int
+	SeqNum   uint64
 	// You'll have to add definitions here.
 }
 
